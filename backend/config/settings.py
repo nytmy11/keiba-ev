@@ -34,10 +34,11 @@ ALLOWED_HOSTS += [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",
 INSTALLED_APPS = ["rest_framework", "ev"]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # 他サイトの iframe に埋め込ませない。WhiteNoise はここより後ろに処理を渡さずに返すので、必ずその前に置く
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     # React のビルド結果（frontend/dist）を / で配る。index.html とハッシュ付きの JS・CSS
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",  # 他サイトの iframe に埋め込ませない
 ]
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
