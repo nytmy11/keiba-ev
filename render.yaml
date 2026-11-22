@@ -1,0 +1,22 @@
+# Render の Blueprint（このファイルを読ませると、下の設定で Web サービスが作られる）
+services:
+  - type: web
+    name: keiba-ev
+    runtime: python
+    plan: free
+    region: singapore          # 日本から一番近いリージョン
+    # Python サービスの中でも Node が使えるので、React のビルドもここで行う
+    buildCommand: pip install -r requirements-deploy.txt && cd frontend && npm ci && npm run build
+    startCommand: gunicorn config.wsgi --chdir backend --workers 1 --threads 4 --timeout 60
+    healthCheckPath: /api/dates/
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: NODE_VERSION
+        value: "22"            # Vite 8 は Node 20.19 以上か 22.12 以上が必要
+      - key: KEIBA_EV_SOURCE
+        value: store           # 送られてきた JSON を返す（pandas を使わない）
+      - key: DJANGO_SECRET_KEY
+        generateValue: true    # Render がランダムな値を作る
+      - key: KEIBA_EV_PUSH_TOKEN
+        sync: false            # 作成時に画面で入力する（リポジトリには書かない）

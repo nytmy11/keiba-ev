@@ -1,0 +1,15 @@
+.venv/
+logs/
+__pycache__/
+frontend/node_modules/
+frontend/dist/
+secrets.env
+pushed/
+# 自分用のメモ（手元のパスや運用の詳細を含む）は公開しない
+CLAUDE.md
+.claude/
+# 念のため
+*.log
+.env
+*.env
+.playwright-mcp/

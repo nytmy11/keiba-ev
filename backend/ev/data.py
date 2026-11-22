@@ -1,0 +1,261 @@
+"""Read deepimpact's live_picks parquet files (read-only) and recompute EV over time.
+
+EV(t) = p_ens * place_odds(t)
+  - p_ens: the production model's place probability, logged once per race at
+    the FINAL stage (~T-3min) in ev_audit_<date>.parquet
+  - place_odds(t): netkeiba place odds polled every ~1min in
+    nk_odds_series_<date>.parquet (place_low = the value production calls
+    place_now; place_mid = midpoint of the low/high range)
+
+p_ens is only known from the FINAL stage on, so EV before that moment is
+"hindsight" (today's p_ens applied to earlier odds). The payload carries
+audit_at so the UI can tell the two apart.
+
+Horse names / sex-age / jockey and race names come from deepimpact's SQLite
+DB (race_results_clean), opened read-only.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+import sqlite3
+from datetime import date as _date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+# 既定は keiba-ev から見た相対位置（…/project/deepimpact）。別の場所なら環境変数で指定する
+_DEEPIMPACT = Path(__file__).resolve().parents[5] / "deepimpact"
+DATA_DIR = Path(os.environ.get("KEIBA_EV_DATA", _DEEPIMPACT / "data" / "live_picks"))
+DB_PATH = Path(os.environ.get("KEIBA_EV_DB", _DEEPIMPACT / "store" / "db" / "manage.db"))
+EV_THR_DEFAULT = 1.15  # mirrors deepimpact serve/live_picks.py EV_THR
+VENUE = {"01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+         "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"}
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+WEEKDAY = "月火水木金土日"
+COURSE = {"芝": "芝", "ダート": "ダ", "障害": "障"}
+PICK_STAGES = ("EXEC", "FINAL")  # ledger stages that mean "this horse was a pick"
+
+_cache: dict[tuple[str, bool], tuple[tuple, dict]] = {}
+
+
+def _path(kind: str, date: str) -> Path:
+    return DATA_DIR / f"{kind}_{date}.parquet"
+
+
+def available_dates() -> list[str]:
+    dates = set()
+    for kind in ("nk_odds_series", "ev_audit"):
+        for p in DATA_DIR.glob(f"{kind}_*.parquet"):
+            d = p.stem[len(kind) + 1:]
+            if DATE_RE.match(d):
+                dates.add(d)
+    return sorted(dates, reverse=True)
+
+
+def _read(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    return pd.read_parquet(path)
+
+
+def load_entries(date: str) -> pd.DataFrame | None:
+    """Race card (horse name, sex, age, jockey, race name) for the date; None if unavailable."""
+    if not DB_PATH.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True)
+        try:
+            return pd.read_sql_query(
+                "SELECT race_id, horse_num, horse_name, gender, age, weight, jockey, "
+                "race_name, course_len, race_type, ground_state "
+                "FROM race_results_clean WHERE race_date = ?", con, params=(date,))
+        finally:
+            con.close()
+    except Exception as e:  # DB locked or being rebuilt: show the heatmap without names
+        logger.warning("race card unavailable for %s: %s", date, e)
+        return None
+
+
+def load_day(date: str, picks: bool = True) -> dict:
+    """Payload for one race day, cached until any source file changes.
+
+    picks=False は公開版用。買い目の記録（ledger_lastcall）を読まず、★☆ の印を一切含めない。
+    本番の買い判定に使う値（ev_screen・place_pre）も消す（strip_internal）。
+    """
+    paths = [_path("nk_odds_series", date), _path("ev_audit", date),
+             DATA_DIR / "ledger_lastcall.parquet",
+             DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal")]
+    if not picks:
+        paths[2] = Path("__no_ledger__")  # 存在しないパス＝キーは0、読み込みも None
+    key = tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in paths)
+    hit = _cache.get((date, picks))
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        series, audit, ledger = (_read(p) for p in paths[:3])
+    except Exception as e:  # file caught mid-write by the live loop
+        if hit:
+            logger.warning("read failed for %s (%s); serving cached payload", date, e)
+            return hit[1]
+        raise
+    if ledger is not None:
+        ledger = ledger[ledger["race_date"] == date]
+    payload = compute_day(series, audit, ledger, load_entries(date))
+    if not picks:
+        strip_internal(payload)
+    payload["date"] = date
+    payload["weekday"] = WEEKDAY[_date.fromisoformat(date).weekday()]
+    _cache[(date, picks)] = (key, payload)
+    logger.info("built %s: %d races, %d with p_ens", date,
+                len(payload["races"]), sum(r["audit_at"] is not None for r in payload["races"]))
+    return payload
+
+
+def _num(x, nd: int):
+    return None if x is None or not np.isfinite(x) else round(float(x), nd)
+
+
+def _arr(a: np.ndarray, nd: int) -> list:
+    return [_num(v, nd) for v in a]
+
+
+def race_label(rid: str) -> str:
+    try:
+        return f"{VENUE.get(rid[4:6], rid[4:6])}{int(rid[10:12])}R"
+    except (ValueError, IndexError):
+        return rid
+
+
+def meeting(rid: str) -> str:
+    """race_id -> '4回京都5日目' (kai = digits 7-8, nichi = digits 9-10)."""
+    try:
+        return f"{int(rid[6:8])}回{VENUE.get(rid[4:6], rid[4:6])}{int(rid[8:10])}日目"
+    except (ValueError, IndexError):
+        return ""
+
+
+def _str(x):
+    return None if x is None or (isinstance(x, float) and np.isnan(x)) else str(x)
+
+
+def _race_card(entries: pd.DataFrame | None) -> dict[str, dict]:
+    """race_id -> race info plus {horse_num: row} from the race_results_clean frame."""
+    card: dict[str, dict] = {}
+    if entries is None or entries.empty:
+        return card
+    for rid, e in entries.groupby("race_id"):
+        r0 = e.iloc[0]
+        course = None
+        if pd.notna(r0["course_len"]):
+            course = f"{COURSE.get(r0['race_type'], r0['race_type'] or '')}{int(r0['course_len'])}m"
+        card[rid] = {"race_name": _str(r0["race_name"]), "course": course,
+                     "ground": _str(r0["ground_state"]),
+                     "horses": {float(h.horse_num): h for h in e.itertuples()}}
+    return card
+
+
+def _horse_card(e) -> dict:
+    if e is None:
+        return {"name": None, "sex_age": None, "jockey": None, "kinryo": None}
+    return {"name": _str(e.horse_name),
+            "sex_age": f"{e.gender or ''}{int(e.age)}" if pd.notna(e.age) else _str(e.gender),
+            "jockey": _str(e.jockey),
+            "kinryo": _num(e.weight, 1) if e.weight is not None else None}
+
+
+def strip_internal(payload: dict) -> dict:
+    """公開版から本番の運用に関わる値を消す（その場で書き換える）。
+
+    ev_screen（T-15 基準の EV）はしきい値と並べると買い目がそのまま分かるので、印と一緒に出さない。
+    """
+    for r in payload["races"]:
+        for h in r["horses"]:
+            h["pick"] = h["ev_screen"] = h["place_pre"] = None
+    return payload
+
+
+def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
+                ledger: pd.DataFrame | None, entries: pd.DataFrame | None = None) -> dict:
+    """Pure transform: raw frames -> per-race time series of odds and EV."""
+    if series is None or series.empty:
+        return {"races": [], "meetings": [], "ev_thr_default": EV_THR_DEFAULT}
+    card = _race_card(entries)
+    s = series.copy()
+    s["polled_at"] = pd.to_datetime(s["polled_at"])
+
+    # p_ens per horse: last FINAL-stage audit per race (a restarted loop can log twice)
+    pens: dict[str, pd.DataFrame] = {}
+    audit_at: dict[str, str] = {}
+    if audit is not None and not audit.empty:
+        a = audit.sort_values("logged_at")
+        last = a.groupby("race_id")["logged_at"].transform("max")
+        a = a[a["logged_at"] == last]
+        # 同じ時刻の同じ馬が2行入る日がある（2026-11-21。原因は未確認）
+        a = a.drop_duplicates(["race_id", "horse_num"], keep="last")
+        for rid, g in a.groupby("race_id"):
+            pens[rid] = g.set_index("horse_num")
+            audit_at[rid] = str(g["logged_at"].iloc[0])[11:19]  # HH:MM:SS, same as times
+
+    picks: dict[tuple[str, float], str] = {}
+    if ledger is not None and not ledger.empty:
+        for r in ledger[ledger["stage"].isin(PICK_STAGES)].itertuples():
+            k = (r.race_id, float(r.horse_num))
+            if picks.get(k) != "EXEC":  # EXEC（購入）を FINAL（通知）より優先する
+                picks[k] = r.stage
+
+    races = []
+    for rid, g in s.groupby("race_id"):
+        times = np.sort(g["polled_at"].unique())
+        mins = g.groupby("polled_at")["mins_to_hasso"].first().reindex(times).to_numpy()
+        hasso = (g["polled_at"] + pd.to_timedelta(g["mins_to_hasso"], unit="min")).median()
+        wide = g.pivot_table(index="polled_at", columns="horse_num",
+                             values=["win", "place_low", "place_high"], aggfunc="last")
+        wide = wide.reindex(times)
+        p = pens.get(rid)
+        rc = card.get(rid, {})
+        horses = []
+        for num in sorted(g["horse_num"].unique()):
+            low = wide[("place_low", num)].to_numpy(dtype=float, copy=True)
+            high = wide[("place_high", num)].to_numpy(dtype=float, copy=True)
+            win = wide[("win", num)].to_numpy(dtype=float, copy=True)
+            # netkeiba は取消・除外の馬を「単勝 999.9・複勝の下限 -3.0」で返す。オッズなしとして扱う
+            gone = low < 0
+            low[gone] = high[gone] = win[gone] = np.nan
+            row = p.loc[num] if p is not None and num in p.index else None
+            pe = float(row["p_ens"]) if row is not None else np.nan
+            horses.append({
+                "num": int(num),
+                **_horse_card(rc.get("horses", {}).get(float(num))),
+                "p_ens": _num(pe, 4),
+                "ev_screen": _num(row["ev"], 4) if row is not None else None,
+                "place_pre": _num(row["place_odds_pre"], 1) if row is not None else None,
+                "pick": picks.get((rid, float(num))),
+                "win": _arr(win, 1),
+                "low": _arr(low, 1),
+                "high": _arr(high, 1),
+                "ev_low": _arr(pe * low, 4),
+                "ev_mid": _arr(pe * (low + high) / 2, 4),
+            })
+        races.append({
+            "race_id": rid,
+            "label": race_label(rid),
+            "venue": VENUE.get(rid[4:6], rid[4:6]),
+            "rno": int(rid[10:12]),
+            "meeting": meeting(rid),
+            "race_name": rc.get("race_name"),
+            "course": rc.get("course"),
+            "ground": rc.get("ground"),
+            "hasso": hasso.strftime("%H:%M"),
+            "audit_at": audit_at.get(rid),
+            "times": [t.strftime("%H:%M:%S") for t in pd.to_datetime(times)],
+            "mins": _arr(mins, 2),
+            "horses": horses,
+        })
+    races.sort(key=lambda r: (r["hasso"], r["race_id"]))
+    meetings = [meeting(k) for k in sorted({r["race_id"][:10] for r in races})]
+    return {"races": races, "meetings": meetings, "ev_thr_default": EV_THR_DEFAULT}
