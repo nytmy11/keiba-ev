@@ -4,8 +4,9 @@
 それを PUSH_DIR に保存し、閲覧者にはそのまま返す。
 
 - PUSH_DIR: 送られてきた当日分。Render の無料枠はディスクが一時的なので、再起動で消える
-- SNAPSHOT_DIR: リポジトリに入っている過去分（snapshots/<日付>.json.gz）。再起動しても残る
-同じ日付が両方にあれば PUSH_DIR（新しい方）を優先する。
+- GitHub の snapshots: デプロイ後に確定した分（remote.py）。再起動しても読み直せる
+- SNAPSHOT_DIR: デプロイに同梱された過去分（snapshots/<日付>.json.gz）。GitHub に届かないときの控えも兼ねる
+同じ日付があれば、この順に優先する。
 gunicorn のワーカーが複数でも食い違わないよう、メモリではなくファイルを正とする。
 """
 from __future__ import annotations
@@ -19,6 +20,8 @@ from pathlib import Path
 
 from django.conf import settings
 
+from . import remote
+
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")  # data.py と同じ（pandas を読み込まないよう複製）
 SUFFIX = ".json.gz"
 MAX_JSON_BYTES = 20 * 1024 * 1024  # 展開後の上限（1日分は 0.5MB 前後）
@@ -29,7 +32,7 @@ def _dirs() -> list[Path]:
 
 
 def available_dates() -> list[str]:
-    dates = set()
+    dates = set(remote.index())
     for d in _dirs():
         if d.is_dir():
             for p in d.glob(f"*{SUFFIX}"):
@@ -39,20 +42,20 @@ def available_dates() -> list[str]:
     return sorted(dates, reverse=True)
 
 
-def find(date: str) -> Path | None:
+def read_gz(date: str) -> bytes | None:
+    """gzip のバイト列をそのまま返す（ブラウザへ Content-Encoding: gzip で渡す）。"""
     if not DATE_RE.match(date):
         return None
-    for d in _dirs():
-        p = d / f"{date}{SUFFIX}"
-        if p.exists():
-            return p
-    return None
+    pushed, bundled = (d / f"{date}{SUFFIX}" for d in _dirs())
+    if pushed.exists():
+        return pushed.read_bytes()
+    local = bundled.read_bytes() if bundled.exists() else None
 
+    def check(gz: bytes) -> None:
+        if decode(gz).get("date") != date:
+            raise ValueError("payload date does not match the file name")
 
-def read_gz(date: str) -> bytes | None:
-    """保存されている gzip のバイト列をそのまま返す（ブラウザへ Content-Encoding: gzip で渡す）。"""
-    p = find(date)
-    return p.read_bytes() if p else None
+    return remote.read(date, local, check) or local
 
 
 def decode(gz: bytes) -> dict:

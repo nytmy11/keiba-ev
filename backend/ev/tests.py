@@ -2,11 +2,12 @@ import gzip
 import json
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 from django.test import SimpleTestCase, override_settings
 
-from . import store
+from . import remote, store
 from .data import compute_day, strip_internal
 
 RID = "202605040501"
@@ -126,7 +127,8 @@ class StoreApiTests(SimpleTestCase):
         self.snap_dir.mkdir()
         (self.snap_dir / "2026-11-15.json.gz").write_bytes(store.encode(_payload("2026-11-15", 2)))
         cm = override_settings(KEIBA_EV_SOURCE="store", KEIBA_EV_PUSH_TOKEN="secret",
-                               KEIBA_EV_PUSH_DIR=self.push_dir, KEIBA_EV_SNAPSHOT_DIR=self.snap_dir)
+                               KEIBA_EV_PUSH_DIR=self.push_dir, KEIBA_EV_SNAPSHOT_DIR=self.snap_dir,
+                               KEIBA_EV_REMOTE_URL="")
         cm.enable()
         self.addCleanup(cm.disable)
 
@@ -171,3 +173,98 @@ class StoreApiTests(SimpleTestCase):
 
     def test_missing_day_is_404(self):
         self.assertEqual(self.client.get("/api/day/2026-01-01/").status_code, 404)
+
+
+class RemoteSnapshotTests(SimpleTestCase):
+    """GitHub に push 済みの確定分の読み取り（通信はすべて差し替える）。"""
+
+    OLD, NEW = "2026-11-15", "2026-11-28"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.push_dir, self.snap_dir = Path(tmp.name, "pushed"), Path(tmp.name, "snapshots")
+        self.snap_dir.mkdir()
+        self.bundled = store.encode(_payload(self.OLD, 2))
+        (self.snap_dir / f"{self.OLD}.json.gz").write_bytes(self.bundled)
+        cm = override_settings(KEIBA_EV_SOURCE="store", KEIBA_EV_PUSH_DIR=self.push_dir,
+                               KEIBA_EV_SNAPSHOT_DIR=self.snap_dir, KEIBA_EV_REMOTE_URL="https://example.test/s")
+        cm.enable()
+        self.addCleanup(cm.disable)
+        remote.reset()
+        self.addCleanup(remote.reset)
+        self.files = {}
+        p = mock.patch.object(remote, "_get", side_effect=lambda name, limit: self.files[name])
+        self.get = p.start()
+        self.addCleanup(p.stop)
+
+    def _publish(self, date, body, sha=None):
+        self.files[f"{date}.json.gz"] = body
+        self.files["index.json"] = json.dumps({date: sha or remote.blob_sha(body)}).encode()
+
+    def _races(self, date):
+        return len(self.client.get(f"/api/day/{date}/").json()["races"])
+
+    def _fetched(self):
+        return [c.args[0] for c in self.get.call_args_list]
+
+    def test_blob_sha_is_same_as_git(self):
+        self.assertEqual(remote.blob_sha(b""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
+
+    def test_new_day_appears_without_redeploy(self):
+        self._publish(self.NEW, store.encode(_payload(self.NEW, 4)))
+        self.assertEqual(self.client.get("/api/dates/").json()["dates"], [self.NEW, self.OLD])
+        self.assertEqual(self._races(self.NEW), 4)
+
+    def test_updated_day_replaces_bundled(self):
+        self._publish(self.OLD, store.encode(_payload(self.OLD, 6)))
+        self.assertEqual(self._races(self.OLD), 6)
+
+    def test_pushed_wins_over_remote(self):
+        self._publish(self.OLD, store.encode(_payload(self.OLD, 6)))
+        self.push_dir.mkdir()
+        (self.push_dir / f"{self.OLD}.json.gz").write_bytes(store.encode(_payload(self.OLD, 7)))
+        self.assertEqual(self._races(self.OLD), 7)
+
+    def test_same_hash_is_not_downloaded(self):
+        self._publish(self.OLD, self.bundled)
+        self.assertEqual(self._races(self.OLD), 2)
+        self.assertEqual(self._fetched(), ["index.json"])
+
+    def test_cached_after_first_fetch(self):
+        self._publish(self.NEW, store.encode(_payload(self.NEW, 4)))
+        for _ in range(3):
+            self.assertEqual(self._races(self.NEW), 4)
+        self.assertEqual(self._fetched(), ["index.json", f"{self.NEW}.json.gz"])
+
+    def test_hash_mismatch_falls_back(self):
+        self._publish(self.OLD, store.encode(_payload(self.OLD, 6)), sha="0" * 40)
+        self.assertEqual(self._races(self.OLD), 2)
+
+    def test_wrong_date_or_broken_body_falls_back(self):
+        for body in (store.encode(_payload(self.NEW, 6)), b"not gzip"):
+            remote.reset()
+            self._publish(self.OLD, body)
+            self.assertEqual(self._races(self.OLD), 2)
+
+    def test_offline_falls_back_and_does_not_hammer(self):
+        self.get.side_effect = OSError("offline")
+        for _ in range(3):
+            self.assertEqual(self._races(self.OLD), 2)
+        self.assertEqual(self.get.call_count, 1)
+
+    def test_last_good_survives_outage(self):
+        self._publish(self.NEW, store.encode(_payload(self.NEW, 4)))
+        self.assertEqual(self._races(self.NEW), 4)
+        self.get.side_effect = OSError("offline")
+        remote._index_next = 0.0
+        self.assertEqual(self._races(self.NEW), 4)
+
+    def test_unknown_date_is_never_fetched(self):
+        self._publish(self.NEW, store.encode(_payload(self.NEW, 4)))
+        self.assertEqual(self.client.get("/api/day/2026-01-01/").status_code, 404)
+        self.assertEqual(self._fetched(), ["index.json"])
+
+    def test_bad_index_entries_are_ignored(self):
+        self.files["index.json"] = json.dumps({"../../x": "0" * 40, self.NEW: "zz"}).encode()
+        self.assertEqual(self.client.get("/api/dates/").json()["dates"], [self.OLD])

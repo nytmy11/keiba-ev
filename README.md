@@ -27,13 +27,14 @@ EV(t) = p_ens × 複勝オッズ(t)
    ↓ 読むだけ
 [自宅PC] publish.py live … 20秒ごとに確認し、変化があれば gzip した JSON を送信
    ↓ HTTPS POST /api/push/<日付>/（ヘッダーの合言葉で認証）
-[Render] Django … 受け取った当日分と、リポジトリの snapshots/（過去分）を返す
+[Render] Django … 受け取った当日分と、GitHub の snapshots/（確定した過去分）を返す
    ↑ GET /api/day/<日付>/
 [ブラウザ] React … 30秒ごとに取り直してヒートマップを描く
 ```
 
 - その日の最終レースが終わると、自宅PCがその日の記録を `snapshots/<日付>.json.gz` に書き出してコミットします。
-  Render の無料枠はディスクが再起動で消えますが、過去分はリポジトリに残ります
+  Render の無料枠はディスクが再起動で消えるため、公開版は確定分を GitHub の公開ファイルから読みます
+  （再デプロイも GitHub への権限も不要です。一覧 `snapshots/index.json` のハッシュと中身が一致したものだけを使います）
 - 公開版のサーバーは計算をしないので、依存は Django・DRF・gunicorn・whitenoise だけです（`requirements-deploy.txt`）
 
 ## 技術構成

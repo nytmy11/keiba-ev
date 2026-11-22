@@ -8,6 +8,7 @@
 | DJANGO_DEBUG | 1 | 0（RENDER があれば既定で 0） |
 | DJANGO_SECRET_KEY | 起動のたびに乱数で作る | Render が自動生成 |
 | KEIBA_EV_PUSH_TOKEN | 空（＝受け取り無効） | 自宅PCと同じ合言葉 |
+| KEIBA_EV_REMOTE_URL | 空（＝GitHub を読まない） | 公開リポジトリの snapshots（RENDER があれば既定で入る） |
 """
 import os
 from datetime import datetime
@@ -66,6 +67,10 @@ KEIBA_EV_SOURCE = os.environ.get("KEIBA_EV_SOURCE", "local")
 KEIBA_EV_PUSH_TOKEN = os.environ.get("KEIBA_EV_PUSH_TOKEN", "")
 KEIBA_EV_PUSH_DIR = Path(os.environ.get("KEIBA_EV_PUSH_DIR", APP_ROOT / "pushed"))
 KEIBA_EV_SNAPSHOT_DIR = Path(os.environ.get("KEIBA_EV_SNAPSHOT_DIR", APP_ROOT / "snapshots"))
+# 確定データの読み先。公開ファイルを読むだけなので鍵は要らない（ev/remote.py）
+KEIBA_EV_REMOTE_URL = os.environ.get(
+    "KEIBA_EV_REMOTE_URL",
+    "https://raw.githubusercontent.com/nytmy11/keiba-ev/refs/heads/main/snapshots" if ON_RENDER else "")
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024  # push の本文（gzip で 1日 0.1MB 前後）
 
 LANGUAGE_CODE = "ja"

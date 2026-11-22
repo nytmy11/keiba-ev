@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -26,7 +27,7 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_ROOT / "backend"))
-from ev import data, store  # noqa: E402  (backend/ を path に足してから読む)
+from ev import data, remote, store  # noqa: E402  (backend/ を path に足してから読む)
 
 LOG_DIR = APP_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -90,18 +91,35 @@ def write_snapshot(date: str, payload: dict) -> Path:
 
 
 def git_push_snapshot(path: Path, date: str) -> None:
-    """その日のスナップショットをコミットして push する。Render が再デプロイし、再起動しても残るようになる。"""
+    """その日のスナップショットと一覧（index.json）を1コミットで push する。公開版は GitHub からこれを読む。"""
     def git(*args):
         # タスクスケジューラから pythonw で動くので、git のコンソール窓を出さない
         return subprocess.run(["git", "-C", str(APP_ROOT), *args], capture_output=True, text=True,
                               encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     rel = path.relative_to(APP_ROOT).as_posix()
-    git("add", "--", rel)
-    if git("diff", "--cached", "--quiet", "--", rel).returncode == 0:
+    # 一覧は HEAD の中身＋この日の分だけで作る（手元にある未コミットの他の日を載せない）
+    tree = git("ls-tree", "HEAD", "snapshots/")
+    added = git("add", "--", rel)
+    staged = git("rev-parse", f":{rel}")
+    for r in (tree, added, staged):
+        if r.returncode != 0:
+            logger.error("snapshot index failed: %s", (r.stderr or r.stdout).strip()[:300])
+            return
+    shas = {}
+    for line in tree.stdout.splitlines():
+        _mode, _kind, sha, file = line.split(maxsplit=3)
+        if file.endswith(store.SUFFIX):
+            shas[file.rsplit("/", 1)[-1][: -len(store.SUFFIX)]] = sha
+    shas[date] = staged.stdout.strip()
+    index = path.parent / remote.INDEX_NAME
+    index.write_bytes(json.dumps(shas, indent=1, sort_keys=True).encode())
+    rels = (rel, index.relative_to(APP_ROOT).as_posix())
+    git("add", "--", *rels)
+    if git("diff", "--cached", "--quiet", "--", *rels).returncode == 0:
         logger.info("snapshot %s unchanged; nothing to commit", date)
         return
-    # コミットはこのファイルだけに絞る（作業中の他の変更をうっかり公開しない）
-    for args in (("commit", "-m", f"data: {date} のスナップショット", "--", rel), ("push",)):
+    # コミットはこの2ファイルだけに絞る（作業中の他の変更をうっかり公開しない）
+    for args in (("commit", "-m", f"data: {date} のスナップショット", "--", *rels), ("push",)):
         r = git(*args)
         if r.returncode != 0:
             logger.error("git %s failed: %s", args[0], (r.stderr or r.stdout).strip()[:300])
@@ -164,7 +182,8 @@ def live(git_push: bool) -> None:
         time.sleep(CHECK_SEC)
 
     logger.info("racing over for %s (idle %.0f min)", date, idle_min)
-    final = store.decode(sent_gz) if sent_gz else {**payload, "published_at": None}
+    # 最後の送信に失敗していても、確定版には最新の中身を残す（GitHub の分が公開版の正になる）
+    final = store.decode(sent_gz) if core == sent_core else {**payload, "published_at": None}
     path = write_snapshot(date, final)
     logger.info("wrote %s (%d bytes)", path, path.stat().st_size)
     if git_push:
