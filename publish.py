@@ -92,8 +92,9 @@ def write_snapshot(date: str, payload: dict) -> Path:
 def git_push_snapshot(path: Path, date: str) -> None:
     """その日のスナップショットをコミットして push する。Render が再デプロイし、再起動しても残るようになる。"""
     def git(*args):
+        # タスクスケジューラから pythonw で動くので、git のコンソール窓を出さない
         return subprocess.run(["git", "-C", str(APP_ROOT), *args], capture_output=True, text=True,
-                              encoding="utf-8")
+                              encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     rel = path.relative_to(APP_ROOT).as_posix()
     git("add", "--", rel)
     if git("diff", "--cached", "--quiet", "--", rel).returncode == 0:
