@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { cellAt, evColor, evTextColor, fmt, idxAt, raceStatus } from './ev'
+import { PHASE, cellAt, evColor, evTextColor, fmt, idxAt, phaseAt, raceStatus } from './ev'
 
 const PICK_MARK = { EXEC: '★', FINAL: '☆' }
 
@@ -22,9 +22,11 @@ function Tip({ tip, thr }) {
       <dl>
         <dt>EV</dt>
         <dd style={ev != null && ev >= thr ? { color: evColor(ev, thr), fontWeight: 700 } : undefined}>
-          {c.kind === 'ev' ? `${fmt(ev)}${c.hindsight ? '（後知恵）' : ''}` : 'p_ens 未確定'}
+          {c.kind === 'ev' ? fmt(ev) : '予測なし'}
         </dd>
-        <dt>p_ens</dt><dd>{fmt(h.p_ens, 3)}</dd>
+        <dt>予測</dt>
+        <dd>{c.phase ? PHASE[c.phase].label : r.tyb_at && r.tyb_at <= tip.cursor ? 'TYB到着済み（記録は締切約3分前）' : 'TYB 未着'}</dd>
+        <dt>複勝率</dt><dd>{fmt(c.p, 3)}{c.p != null && c.phase !== 'final' && h.p_ens != null && <small> 確定 {fmt(h.p_ens, 3)}</small>}</dd>
         <dt>単勝</dt><dd>{fmt(c.win, 1)}</dd>
         <dt>複勝</dt><dd>{c.low == null ? '–' : `${fmt(c.low, 1)}–${fmt(c.high, 1)}`}</dd>
         {h.ev_screen != null && <><dt>本番EV</dt><dd>{fmt(h.ev_screen)} <small>T-15基準</small></dd></>}
@@ -48,16 +50,18 @@ function Cell({ race, horse, cursor, basis, hindsight, thr, onHover }) {
   }
   if (c.kind !== 'ev' || c.ev == null) {
     return (
-      <td className="cell pending" {...hover}>
+      <td className={`cell pending${c.phase === 'pre' ? ' pre' : ''}`} {...hover}>
         <span className="odds">{fmt(c.low, 1)}</span>{mark}
       </td>
     )
   }
   const over = c.ev >= thr
+  // 仮予測（TYB前）は縞模様にして光らせない。光るのは TYB 後・確定・後知恵だけ
+  const pre = c.phase === 'pre'
   return (
     <td
-      className={`cell ev${over ? ' over' : ''}${c.hindsight ? ' hindsight' : ''}`}
-      style={{ background: evColor(c.ev, thr), color: evTextColor(c.ev, thr), '--glow': evColor(c.ev, thr) }}
+      className={`cell ev${over ? (pre ? ' over-pre' : ' over') : ''}${pre ? ' pre' : ''}${c.hindsight ? ' hindsight' : ''}`}
+      style={{ backgroundColor: evColor(c.ev, thr), color: evTextColor(c.ev, thr), '--glow': evColor(c.ev, thr) }}
       {...hover}
     >
       {fmt(c.ev)}{mark}
@@ -72,7 +76,7 @@ export default function Heatmap({ races, cursor, basis, hindsight, thr, selected
   // look the hovered cell up again on every render so replay and polling keep it current
   const tr = tip && races.find((r) => r.race_id === tip.rid)
   const th = tr && tr.horses.find((h) => h.num === tip.num)
-  const live = th && { ...tip, race: tr, horse: th, c: cellAt(tr, th, idxAt(tr.times, cursor), cursor, basis, hindsight) }
+  const live = th && { ...tip, cursor, race: tr, horse: th, c: cellAt(tr, th, idxAt(tr.times, cursor), cursor, basis, hindsight) }
   return (
     <div className="heatmap-wrap" onScroll={() => setTip(null)}>
       <table className="heatmap">
@@ -85,7 +89,9 @@ export default function Heatmap({ races, cursor, basis, hindsight, thr, selected
         <tbody>
           {races.map((r) => {
             const byNum = Object.fromEntries(r.horses.map((h) => [h.num, h]))
-            const st = raceStatus(r, idxAt(r.times, cursor))
+            const ri = idxAt(r.times, cursor)
+            const st = raceStatus(r, ri)
+            const ph = st.cls === 'done' ? null : phaseAt(r, ri) // 発走後は段階を出さない（どの行も「確定」になるだけ）
             return (
               <tr key={r.race_id} className={r.race_id === selected ? 'sel' : ''}
                   onClick={() => onSelect(r.race_id)}>
@@ -94,6 +100,7 @@ export default function Heatmap({ races, cursor, basis, hindsight, thr, selected
                   <span className="rlabel">{r.label}</span>
                   <span className="rtime">{r.hasso}</span>
                   <span className={`rstat ${st.cls}`}>{st.text}</span>
+                  <span className={`phase ${ph ?? ''}`} title={ph ? PHASE[ph].title : undefined}>{ph ? PHASE[ph].badge : ''}</span>
                 </th>
                 {cols.map((n) => (
                   <Cell key={n} race={r} horse={byNum[n]} cursor={cursor}

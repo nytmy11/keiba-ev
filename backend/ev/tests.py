@@ -7,7 +7,7 @@ from unittest import mock
 import pandas as pd
 from django.test import SimpleTestCase, override_settings
 
-from . import remote, store
+from . import data, remote, store
 from .data import compute_day, strip_internal
 
 RID = "202605040501"
@@ -100,6 +100,83 @@ class ComputeDayTests(SimpleTestCase):
     def test_missing_race_card_leaves_names_empty(self):
         h = compute_day(_series(), None, None, None)["races"][0]["horses"][0]
         self.assertIsNone(h["name"])
+
+
+def _series_at(*hms):
+    """指定した時刻にオッズを取った系列（1番は複勝 2.0–4.0、2番は 10.0–20.0 で一定）。"""
+    rows = []
+    for k, t in enumerate(hms):
+        for num, low, high in ((1.0, 2.0, 4.0), (2.0, 10.0, 20.0)):
+            rows.append({"polled_at": f"2026-10-12T{t}", "race_id": RID, "horse_num": num, "win": low * 3,
+                         "place_low": low, "place_high": high, "nk_official": t, "mins_to_hasso": 20.0 - k})
+    return pd.DataFrame(rows)
+
+
+def _viewer(*recs):
+    """記録係の記録。recs は (時刻, 段階, {馬番: p})。時刻の書式は本物と同じ空白区切り。"""
+    rows = [{"logged_at": f"2026-10-12 {t}", "race_id": RID, "horse_num": num, "p_place_prod": p, "stage": st}
+            for t, st, ps in recs for num, p in ps.items()]
+    return pd.DataFrame(rows)
+
+
+class PhaseTests(SimpleTestCase):
+    """どこまでが仮の予測（TYB 前）で、どこからが TYB 後・確定かを時刻ごとに付ける。"""
+
+    def test_phase_follows_viewer_stage_then_final(self):
+        viewer = _viewer(("09:29:00", "S4", {1.0: 0.3, 2.0: 0.05}), ("09:35:00", "S5", {1.0: 0.4, 2.0: 0.06}))
+        r = compute_day(_series_at("09:30:00", "09:35:30", "09:40:00", "09:47:00"),
+                        _audit("2026-10-12T09:46:00", 0.5), None, None, viewer)["races"][0]
+        self.assertEqual(r["phase"], ["pre", "tyb", "tyb", "final"])
+        self.assertEqual(r["tyb_at"], "09:35:00")
+        h1, h2 = r["horses"]
+        self.assertEqual(h1["p"], [0.3, 0.4, 0.4, 0.5])
+        self.assertEqual(h2["p"], [0.05, 0.06, 0.06, 0.1])
+        self.assertEqual(h1["ev_low"], [1.0, 1.0, 1.0, 1.0])  # 従来の列は確定 p_ens のまま（後知恵用）
+
+    def test_stale_viewer_record_is_not_used(self):
+        # 記録係が止まった後の古い予測を、その時刻の予測として出さない
+        viewer = _viewer(("09:20:00", "S4", {1.0: 0.3}))
+        r = compute_day(_series_at("09:30:00"), None, None, None, viewer)["races"][0]
+        self.assertEqual(r["phase"], [None])
+        self.assertEqual(r["horses"][0]["p"], [None])
+
+    def test_horse_missing_from_viewer_has_no_p(self):
+        viewer = _viewer(("09:29:00", "S4", {1.0: 0.3}))
+        r = compute_day(_series_at("09:30:00"), None, None, None, viewer)["races"][0]
+        self.assertEqual([h["p"] for h in r["horses"]], [[0.3], [None]])
+
+    def test_tyb_at_is_earlier_of_shadow_and_viewer(self):
+        viewer = _viewer(("09:35:00", "S5", {1.0: 0.4}))
+        shadow = pd.DataFrame({"race_id": [RID], "first_seen_at": ["2026-10-12T09:34:20"]})
+        r = compute_day(_series_at("09:30:00"), None, None, None, viewer, shadow)["races"][0]
+        self.assertEqual(r["tyb_at"], "09:34:20")
+
+    def test_without_viewer_only_final_is_known(self):
+        # 記録係を動かしていない日: TYB の時刻は本番の記録から分かるが、確定前の予測は無い
+        shadow = pd.DataFrame({"race_id": [RID], "first_seen_at": ["2026-10-12T09:34:20"]})
+        r = compute_day(_series_at("09:40:00", "09:47:00"), _audit("2026-10-12T09:46:00", 0.5),
+                        None, None, None, shadow)["races"][0]
+        self.assertEqual(r["tyb_at"], "09:34:20")
+        self.assertEqual(r["phase"], [None, "final"])
+        self.assertEqual(r["horses"][0]["p"], [None, 0.5])
+
+    def test_viewer_selection_columns_never_reach_payload(self):
+        # 記録係のファイルには買い判定の列もある。公開版のデータに混ざらないこと
+        viewer = _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(sel_prod=True, ev_prod=1.9, rule="x", price=2.0)
+        out = strip_internal(compute_day(_series_at("09:30:00"), None, None, None, viewer))
+        text = json.dumps(out, ensure_ascii=False)
+        for word in ("sel_", "ev_prod", "rule", "price", "p_place"):
+            self.assertNotIn(word, text)
+        self.assertEqual(out["races"][0]["horses"][0]["p"], [0.3])
+
+    def test_load_viewer_reads_only_needed_columns(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, f"{RID}.parquet")
+            _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(sel_prod=True).to_parquet(f)
+            Path(d, "broken.parquet").write_bytes(b"not parquet")
+            v = data.load_viewer([f, Path(d, "broken.parquet")])  # 壊れたファイルは飛ばす
+        self.assertEqual(list(v.columns), data.VIEWER_COLS)
+        self.assertEqual(len(v), 1)
 
 
 class ApiTests(SimpleTestCase):

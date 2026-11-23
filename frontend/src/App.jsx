@@ -26,6 +26,12 @@ function Legend({ thr }) {
         <span style={{ left: `${at}%` }} className="thr">しきい値 {thr.toFixed(2)}</span>
         <span>{hi.toFixed(2)}+</span>
       </div>
+      <div className="phase-legend">
+        <span><i className="sw pre" />仮予測（TYB前・光らない）</span>
+        <span><i className="sw tyb" />本予測（TYB後）・確定</span>
+        <span><i className="sw hindsight" />後知恵</span>
+        <span><i className="sw pending" />予測なし（複勝オッズ）</span>
+      </div>
     </div>
   )
 }
@@ -84,16 +90,17 @@ export default function App() {
     return () => clearInterval(id)
   }, [isPlaying, allTimes])
 
-  const hot = useMemo(() => {
-    const out = []
+  // しきい値超えの数。仮予測（TYB前）は別に数える
+  const [hot, hotPre] = useMemo(() => {
+    const out = [], pre = []
     for (const r of races) {
       const i = idxAt(r.times, cur)
       for (const h of r.horses) {
         const c = cellAt(r, h, i, cur, basis, hindsight)
-        if (c.kind === 'ev' && c.ev != null && c.ev >= thr) out.push(`${r.label}-${h.num}`)
+        if (c.kind === 'ev' && c.ev != null && c.ev >= thr) (c.phase === 'pre' ? pre : out).push(`${r.label}-${h.num}`)
       }
     }
-    return out
+    return [out, pre]
   }, [races, cur, basis, hindsight, thr])
 
   const selRace = races.find((r) => r.race_id === selected) ?? null
@@ -119,7 +126,7 @@ export default function App() {
               <option value="ev_mid">複勝の中央値（楽観的）</option>
             </select>
           </label>
-          <label className="check" title="p_ens は締切約3分前に1回だけ記録される。オンにすると、それ以前の時刻にも確定後の p_ens を当てはめて表示する">
+          <label className="check" title="確定前の予測が無い時刻にも、確定後の p_ens（締切約3分前に記録）を当てはめて表示する">
             <input type="checkbox" checked={hindsight} onChange={(e) => setHindsight(e.target.checked)} />
             後知恵モード
           </label>
@@ -147,6 +154,7 @@ export default function App() {
         <span className="summary">
           しきい値超え <b>{hot.length}</b> 頭
           {hot.length > 0 && <span className="hotlist">（{hot.slice(0, 6).join(' / ')}{hot.length > 6 ? ' …' : ''}）</span>}
+          {hotPre.length > 0 && <span className="hotlist" title={hotPre.join(' / ')}> ・仮予測で {hotPre.length} 頭</span>}
         </span>
         <span className="fetched">
           {isPublic && day?.published_at && `データ ${day.published_at.slice(11, 19)} ・`}
@@ -166,7 +174,9 @@ export default function App() {
       </main>
 
       <footer>
-        EV = p_ens（モデルの複勝確率）× 複勝オッズ。セルの数字は選んだ時刻の EV、灰色の数字は p_ens 未確定のため複勝オッズのみ。
+        EV = モデルの複勝率 × 複勝オッズ。セルの数字は選んだ時刻の EV、灰色の数字は予測が無いので複勝オッズのみ。
+        モデルの予測は、JRDB の TYB（パドック・馬体重など当日の情報）が発走の約5〜17分前に届いてからが本予測。
+        それより前の縞模様のセルは TYB 抜きの仮予測で、レース名の右の「仮／本／確定」がその時刻の段階。
         {isPublic
           ? '開催日はオッズ（約1分ごと）とモデルの出力を自宅PCで計算し、この画面へ送っている。過去の日は記録の再生。'
           : '★ 購入 / ☆ 最終通知。データ: deepimpact/data/live_picks（読み取り専用）'}

@@ -58,6 +58,12 @@ input[type='range'] { accent-color: var(--accent); }
 .legend .mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; }
 .legend .labels { position: relative; display: flex; justify-content: space-between; font-size: 11px; color: var(--fg-dim); height: 16px; }
 .legend .labels .thr { position: absolute; transform: translateX(-50%); color: var(--fg); }
+.phase-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--fg-dim); margin-top: 2px; }
+.phase-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.sw { display: inline-block; width: 18px; height: 12px; border-radius: 3px; background-color: hsl(36 95% 55%); }
+.sw.pre { background-image: repeating-linear-gradient(135deg, rgba(0, 0, 0, 0.32) 0 3px, transparent 3px 7px); }
+.sw.hindsight { outline: 1px dashed rgba(255, 255, 255, 0.6); outline-offset: -3px; }
+.sw.pending { background: #141922; border: 1px dashed #2a3140; }
 
 main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 main.split { grid-template-columns: minmax(0, 1fr) minmax(380px, 640px); }
@@ -71,7 +77,7 @@ main.split { grid-template-columns: minmax(0, 1fr) minmax(380px, 640px); }
 .heatmap tbody tr.sel .rowhead { background: #2a2210; box-shadow: inset 3px 0 var(--accent); }
 .rowhead {
   text-align: left; white-space: nowrap; padding: 0 8px; border-radius: 6px;
-  display: grid; grid-template-columns: 52px 42px 50px; align-items: center; height: 34px;
+  display: grid; grid-template-columns: 52px 42px 50px 30px; align-items: center; height: 34px;
 }
 thead .rowhead { display: table-cell; height: auto; }
 .rlabel { font-weight: 600; }
@@ -80,6 +86,12 @@ thead .rowhead { display: table-cell; height: auto; }
 .rstat.live { color: #3ddc84; }
 .rstat.hot { color: var(--hot); font-weight: 600; }
 .rstat.done { color: #5d6575; }
+/* 予測の段階: 仮（TYB前）/ 本（TYB後）/ 確定 */
+.phase { font-size: 10px; text-align: center; border-radius: 4px; padding: 0 3px; line-height: 16px; }
+.phase.pre { color: #c9b27a; border: 1px dashed #6b5d3a; }
+.phase.tyb { color: #0e1117; background: #7fd8a6; font-weight: 700; }
+.phase.final { color: #0e1117; background: #7aa2ff; font-weight: 700; }
+.detail header .phase { font-size: 11px; padding: 0 6px; }
 
 .cell {
   position: relative; width: 50px; height: 34px; min-width: 50px; border-radius: 5px;
@@ -92,6 +104,9 @@ thead .rowhead { display: table-cell; height: auto; }
 .cell.pending .odds::before { content: '複'; font-size: 9px; margin-right: 1px; }
 .cell.over { font-weight: 700; box-shadow: 0 0 10px 1px var(--glow, rgba(255, 120, 40, 0.55)); }
 .cell.hindsight { outline: 1px dashed rgba(255, 255, 255, 0.45); outline-offset: -3px; }
+.cell.pre { background-image: repeating-linear-gradient(135deg, rgba(0, 0, 0, 0.32) 0 3px, transparent 3px 7px); }
+.cell.over-pre { font-weight: 700; }
+.cell.pending.pre { background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 3px, transparent 3px 7px); }
 .pick { position: absolute; top: -1px; right: 2px; font-size: 10px; color: #ffe066; text-shadow: 0 0 3px #000; }
 
 .detail {
@@ -116,7 +131,16 @@ thead .rowhead { display: table-cell; height: auto; }
 .chart .cursor { stroke: #fff; stroke-opacity: 0.5; }
 .chart .ln { fill: none; stroke-width: 1.4; stroke-linejoin: round; }
 .chart .ln.hot { stroke-width: 2.6; }
-.chart .ln.pre { stroke-dasharray: 3 3; stroke-opacity: 0.6; }
+.chart .ln.ph-pre, .chart-legend .ln.ph-pre { stroke-dasharray: 5 3; stroke-opacity: 0.8; }
+.chart .ln.ph-hindsight, .chart-legend .ln.ph-hindsight { stroke-dasharray: 1 3; stroke-opacity: 0.4; }
+.chart .prezone { fill: rgba(201, 178, 122, 0.07); }
+.chart .tyb { stroke: #7fd8a6; stroke-dasharray: 4 3; }
+.chart .tyb-label { fill: #7fd8a6; font-size: 10px; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 11px; color: var(--fg-dim); margin: -2px 0 8px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.chart-legend .ln { fill: none; stroke-width: 1.6; }
+.prezone-swatch { display: inline-block; width: 14px; height: 10px; background: rgba(201, 178, 122, 0.25); border-radius: 2px; }
+.horses td.pre-text { color: #c9b27a; }
 .chart .hit { fill: none; stroke: transparent; stroke-width: 10; cursor: pointer; }
 .chart .end-label { font-size: 11px; font-weight: 700; }
 .chart .hover-label { fill: var(--fg); font-size: 12px; }

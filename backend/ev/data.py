@@ -11,6 +11,13 @@ p_ens is only known from the FINAL stage on, so EV before that moment is
 "hindsight" (today's p_ens applied to earlier odds). The payload carries
 audit_at so the UI can tell the two apart.
 
+予測の段階（phase）: deepimpact の記録係（scripts/ops/viewer_snapshot.py）が
+data/viewer/<日付>/<race_id>.parquet に、発走前の予測を数分ごとに残している。
+  - S3/S4 = JRDB の TYB（パドック・馬体重など）が届く前の仮の予測 → phase "pre"
+  - S5    = TYB が届いた後。本番のループと同じ入力 → phase "tyb"
+  - FINAL = 本番が締切約3分前に記録した p_ens → phase "final"
+tyb_at は TYB が届いた時刻（本番の h14_shadow の first_seen_at と、記録係の最初の S5 の早い方）。
+
 Horse names / sex-age / jockey and race names come from deepimpact's SQLite
 DB (race_results_clean), opened read-only.
 """
@@ -32,6 +39,10 @@ logger = logging.getLogger(__name__)
 _DEEPIMPACT = Path(__file__).resolve().parents[5] / "deepimpact"
 DATA_DIR = Path(os.environ.get("KEIBA_EV_DATA", _DEEPIMPACT / "data" / "live_picks"))
 DB_PATH = Path(os.environ.get("KEIBA_EV_DB", _DEEPIMPACT / "store" / "db" / "manage.db"))
+VIEWER_DIR = Path(os.environ.get("KEIBA_EV_VIEWER", _DEEPIMPACT / "data" / "viewer"))
+VIEWER_COLS = ["logged_at", "race_id", "horse_num", "p_place_prod", "stage"]  # 買い判定の列（sel_*・ev_*・rule）は読まない
+VIEWER_MATCH = pd.Timedelta(minutes=6)  # 記録係は T-15 までは5分ごと。これより古い記録はその時刻の予測として使わない
+PHASE = {"S3": "pre", "S4": "pre", "S5": "tyb"}
 EV_THR_DEFAULT = 1.15  # mirrors deepimpact serve/live_picks.py EV_THR
 VENUE = {"01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
          "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"}
@@ -81,18 +92,47 @@ def load_entries(date: str) -> pd.DataFrame | None:
         return None
 
 
+def _viewer_files(date: str) -> list[Path]:
+    return sorted((VIEWER_DIR / date).glob("2*.parquet"))
+
+
+def load_viewer(files: list[Path]) -> pd.DataFrame | None:
+    """記録係の予測（p_place_prod と段階だけ）。読めないファイルは飛ばす（書き込み中など）。"""
+    frames = []
+    for f in files:
+        try:
+            frames.append(pd.read_parquet(f, columns=VIEWER_COLS))
+        except Exception as e:
+            logger.warning("viewer file skipped %s: %s", f.name, e)
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
+def load_shadow(path: Path) -> pd.DataFrame | None:
+    """本番の h14_shadow から、レースごとに TYB を最初に見た時刻だけ読む。"""
+    if not path.exists():
+        return None
+    try:
+        return pd.read_parquet(path, columns=["race_id", "first_seen_at"]).drop_duplicates("race_id")
+    except Exception as e:
+        logger.warning("h14_shadow unavailable %s: %s", path.name, e)
+        return None
+
+
 def load_day(date: str, picks: bool = True) -> dict:
     """Payload for one race day, cached until any source file changes.
 
     picks=False は公開版用。買い目の記録（ledger_lastcall）を読まず、★☆ の印を一切含めない。
     本番の買い判定に使う値（ev_screen・place_pre）も消す（strip_internal）。
     """
+    viewer_files = _viewer_files(date)
     paths = [_path("nk_odds_series", date), _path("ev_audit", date),
              DATA_DIR / "ledger_lastcall.parquet",
-             DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal")]
+             DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal"),
+             _path("h14_shadow", date), *viewer_files]
     if not picks:
         paths[2] = Path("__no_ledger__")  # 存在しないパス＝キーは0、読み込みも None
-    key = tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in paths)
+    # 記録係のファイルはレースごとに増えるので、パスもキーに入れる
+    key = tuple((str(p), p.stat().st_mtime_ns if p.exists() else 0) for p in paths)
     hit = _cache.get((date, picks))
     if hit and hit[0] == key:
         return hit[1]
@@ -105,7 +145,8 @@ def load_day(date: str, picks: bool = True) -> dict:
         raise
     if ledger is not None:
         ledger = ledger[ledger["race_date"] == date]
-    payload = compute_day(series, audit, ledger, load_entries(date))
+    payload = compute_day(series, audit, ledger, load_entries(date),
+                          load_viewer(viewer_files), load_shadow(paths[5]))
     if not picks:
         strip_internal(payload)
     payload["date"] = date
@@ -179,9 +220,42 @@ def strip_internal(payload: dict) -> dict:
     return payload
 
 
+def _hms(ts) -> str:
+    return pd.Timestamp(ts).strftime("%H:%M:%S")
+
+
+def _phases(times: np.ndarray, v: pd.DataFrame | None, audit_ts) -> tuple[list, list, dict]:
+    """オッズの各時刻に、その時点で出ていた予測を対応づける。
+
+    返り値: (phase のリスト, 使った記録係の時刻のリスト（なければ None）, {記録係の時刻: {馬番: p}})
+    """
+    n = len(times)
+    phase: list = [None] * n
+    snap_at: list = [None] * n
+    table: dict = {}
+    if v is not None and not v.empty:
+        snaps = v.groupby("logged_at")["stage"].first().sort_index()  # 段階は記録ごとに1つ（全馬同じ）
+        table = {t: dict(zip(g["horse_num"].astype(float), g["p_place_prod"].astype(float)))
+                 for t, g in v.groupby("logged_at")}
+        st = snaps.index.to_numpy()
+        k = np.searchsorted(st, times, side="right") - 1  # その時刻以前で最後の記録
+        for i, j in enumerate(k):
+            if j >= 0 and times[i] - st[j] <= VIEWER_MATCH and snaps.iloc[j] in PHASE:
+                phase[i], snap_at[i] = PHASE[snaps.iloc[j]], snaps.index[j]
+    if audit_ts is not None:
+        for i in range(n):
+            if times[i] >= audit_ts:
+                phase[i], snap_at[i] = "final", None
+    return phase, snap_at, table
+
+
 def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
-                ledger: pd.DataFrame | None, entries: pd.DataFrame | None = None) -> dict:
-    """Pure transform: raw frames -> per-race time series of odds and EV."""
+                ledger: pd.DataFrame | None, entries: pd.DataFrame | None = None,
+                viewer: pd.DataFrame | None = None, shadow: pd.DataFrame | None = None) -> dict:
+    """Pure transform: raw frames -> per-race time series of odds and EV.
+
+    viewer は記録係の予測（VIEWER_COLS）、shadow は h14_shadow の race_id と first_seen_at。どちらも無くてよい。
+    """
     if series is None or series.empty:
         return {"races": [], "meetings": [], "ev_thr_default": EV_THR_DEFAULT}
     card = _race_card(entries)
@@ -191,6 +265,7 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
     # p_ens per horse: last FINAL-stage audit per race (a restarted loop can log twice)
     pens: dict[str, pd.DataFrame] = {}
     audit_at: dict[str, str] = {}
+    audit_ts: dict[str, pd.Timestamp] = {}
     if audit is not None and not audit.empty:
         a = audit.sort_values("logged_at")
         last = a.groupby("race_id")["logged_at"].transform("max")
@@ -200,6 +275,21 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
         for rid, g in a.groupby("race_id"):
             pens[rid] = g.set_index("horse_num")
             audit_at[rid] = str(g["logged_at"].iloc[0])[11:19]  # HH:MM:SS, same as times
+            audit_ts[rid] = pd.Timestamp(g["logged_at"].iloc[0])
+
+    # 記録係の時刻は '2026-11-15 08:42:09'、オッズは '2026-11-15T09:10:52'。どちらも datetime にそろえる
+    views: dict[str, pd.DataFrame] = {}
+    tyb_first: dict[str, pd.Timestamp] = {}
+    if viewer is not None and not viewer.empty:
+        vw = viewer.dropna(subset=["p_place_prod"]).copy()
+        vw["logged_at"] = pd.to_datetime(vw["logged_at"])
+        views = {rid: g for rid, g in vw.groupby("race_id")}
+        for rid, t in vw[vw["stage"] == "S5"].groupby("race_id")["logged_at"].min().items():
+            tyb_first[rid] = t
+    if shadow is not None and not shadow.empty:
+        for r in shadow.dropna(subset=["first_seen_at"]).itertuples():
+            t = pd.Timestamp(r.first_seen_at)
+            tyb_first[r.race_id] = min(t, tyb_first.get(r.race_id, t))
 
     picks: dict[tuple[str, float], str] = {}
     if ledger is not None and not ledger.empty:
@@ -218,6 +308,7 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
         wide = wide.reindex(times)
         p = pens.get(rid)
         rc = card.get(rid, {})
+        phase, snap_at, table = _phases(times, views.get(rid), audit_ts.get(rid))
         horses = []
         for num in sorted(g["horse_num"].unique()):
             low = wide[("place_low", num)].to_numpy(dtype=float, copy=True)
@@ -228,6 +319,9 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
             low[gone] = high[gone] = win[gone] = np.nan
             row = p.loc[num] if p is not None and num in p.index else None
             pe = float(row["p_ens"]) if row is not None else np.nan
+            # その時刻に出ていた予測（仮・TYB後は記録係の値、確定後は p_ens）
+            pt = [pe if ph == "final" else table.get(sa, {}).get(float(num), np.nan) if ph else np.nan
+                  for ph, sa in zip(phase, snap_at)]
             horses.append({
                 "num": int(num),
                 **_horse_card(rc.get("horses", {}).get(float(num))),
@@ -240,6 +334,7 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
                 "high": _arr(high, 1),
                 "ev_low": _arr(pe * low, 4),
                 "ev_mid": _arr(pe * (low + high) / 2, 4),
+                "p": _arr(np.array(pt, dtype=float), 4),
             })
         races.append({
             "race_id": rid,
@@ -252,6 +347,8 @@ def compute_day(series: pd.DataFrame | None, audit: pd.DataFrame | None,
             "ground": rc.get("ground"),
             "hasso": hasso.strftime("%H:%M"),
             "audit_at": audit_at.get(rid),
+            "tyb_at": _hms(tyb_first[rid]) if rid in tyb_first else None,
+            "phase": phase,
             "times": [t.strftime("%H:%M:%S") for t in pd.to_datetime(times)],
             "mins": _arr(mins, 2),
             "horses": horses,
