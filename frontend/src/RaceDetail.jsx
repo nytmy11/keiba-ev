@@ -28,7 +28,7 @@ export default function RaceDetail({ race, cursor, basis, hindsight, thr, intern
           {lead != null && lead >= 0 && `（発走約${lead}分前）`}に到着。
           {live
             ? <>ここからが<b>本予測</b>。それより前は TYB 抜き（98特徴量のうち9個が欠けた状態）の<b>仮予測</b>で、グラフは破線・セルは縞模様。</>
-            : 'この日は確定前の予測を記録していないので、TYB 到着から確定までの予測は表示できない。'}
+            : 'このレースは確定前の予測を記録していないので、TYB 到着から確定までの予測は表示できない。'}
         </p>
       )}
       {race.audit_at ? (
