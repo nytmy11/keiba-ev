@@ -13,3 +13,6 @@ CLAUDE.md
 .env
 *.env
 .playwright-mcp/
+# 手元（自宅PC）の画面にだけ出す追加の表示とそのテスト。公開しない
+backend/ev/local_extras.py
+backend/ev/tests_local.py

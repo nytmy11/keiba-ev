@@ -61,7 +61,8 @@ export default function App() {
   }, [])
 
   const isToday = meta != null && date === meta.today
-  const isPublic = meta?.public === true // 公開版（Render）。買い目は送られてこないので説明も出さない
+  const isPublic = meta?.public === true // 公開版（Render）なら説明文を切り替える
+  const extraCols = day?.extra_cols ?? [] // 手元の API だけが付ける追加の列（公開版には無い）
   useEffect(() => {
     if (!date) return
     let alive = true
@@ -118,11 +119,11 @@ export default function App() {
           <label>しきい値
             <input type="range" min="0.8" max="2" step="0.01" value={thr} onChange={(e) => setThr(+e.target.value)} />
             <input type="number" min="0.5" max="5" step="0.01" value={thr} onChange={(e) => setThr(+e.target.value || 1.15)} className="thr-num" />
-            {thr !== meta?.ev_thr_default && <button className="link" onClick={() => setThr(meta?.ev_thr_default ?? 1.15)}>{isPublic ? '既定値に戻す' : '本番値に戻す'}</button>}
+            {thr !== meta?.ev_thr_default && <button className="link" onClick={() => setThr(meta?.ev_thr_default ?? 1.15)}>既定値に戻す</button>}
           </label>
           <label>オッズ基準
             <select value={basis} onChange={(e) => setBasis(e.target.value)}>
-              <option value="ev_low">{isPublic ? '複勝の下限' : '複勝の下限（本番と同じ）'}</option>
+              <option value="ev_low">複勝の下限</option>
               <option value="ev_mid">複勝の中央値（楽観的）</option>
             </select>
           </label>
@@ -168,9 +169,9 @@ export default function App() {
       <main className={selRace ? 'split' : ''}>
         {races.length
           ? <Heatmap races={races} cursor={cur} basis={basis} hindsight={hindsight} thr={thr}
-                     selected={selected} onSelect={(id) => setSelected(id === selected ? null : id)} />
+                     selected={selected} onSelect={(id) => setSelected(id === selected ? null : id)} extraCols={extraCols} />
           : <p className="empty-msg">{day ? 'この日のオッズ時系列はまだありません。' : '読み込み中…'}</p>}
-        {selRace && <RaceDetail race={selRace} cursor={cur} basis={basis} hindsight={hindsight} thr={thr} internal={!isPublic} />}
+        {selRace && <RaceDetail race={selRace} cursor={cur} basis={basis} hindsight={hindsight} thr={thr} extraCols={extraCols} />}
       </main>
 
       <footer>
@@ -179,7 +180,7 @@ export default function App() {
         それより前の縞模様のセルは TYB 抜きの仮予測で、レース名の右の「仮／本／確定」がその時刻の段階。
         {isPublic
           ? '開催日はオッズ（約1分ごと）とモデルの出力を自宅PCで計算し、この画面へ送っている。過去の日は記録の再生。'
-          : '★ 購入 / ☆ 最終通知。データ: deepimpact/data/live_picks（読み取り専用）'}
+          : day?.legend}
       </footer>
     </div>
   )

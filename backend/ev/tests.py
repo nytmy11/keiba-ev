@@ -8,7 +8,7 @@ import pandas as pd
 from django.test import SimpleTestCase, override_settings
 
 from . import data, remote, store
-from .data import compute_day, strip_internal
+from .data import compute_day, public_only
 
 RID = "202605040501"
 
@@ -25,12 +25,12 @@ def _series():
 
 def _audit(logged_at, p1):
     return pd.DataFrame({"race_id": [RID, RID], "horse_num": [1.0, 2.0], "p_ens": [p1, 0.1],
-                         "ev": [0.9, 1.2], "place_odds_pre": [2.2, 9.0], "logged_at": [logged_at] * 2})
+                         "logged_at": [logged_at] * 2})
 
 
 class ComputeDayTests(SimpleTestCase):
     def test_ev_is_p_ens_times_place_odds(self):
-        out = compute_day(_series(), _audit("2026-10-12T09:46:00", 0.5), None)
+        out = compute_day(_series(), _audit("2026-10-12T09:46:00", 0.5))
         r = out["races"][0]
         self.assertEqual(r["label"], "東京1R")
         self.assertEqual(r["hasso"], "09:49")
@@ -39,49 +39,54 @@ class ComputeDayTests(SimpleTestCase):
         self.assertEqual(h1["ev_low"], [1.0, 1.5])           # 0.5 * (2, 3)
         self.assertEqual(h1["ev_mid"], [1.5, 1.75])          # 0.5 * ((2+4)/2, (3+4)/2)
         self.assertEqual(h2["ev_low"], [1.0, 1.1])           # 0.1 * (10, 11)
-        self.assertEqual(h2["ev_screen"], 1.2)
 
     def test_latest_audit_wins_when_logged_twice(self):
         audit = pd.concat([_audit("2026-10-12T09:45:00", 0.2), _audit("2026-10-12T09:46:00", 0.5)])
-        h1 = compute_day(_series(), audit, None)["races"][0]["horses"][0]
+        h1 = compute_day(_series(), audit)["races"][0]["horses"][0]
         self.assertEqual(h1["p_ens"], 0.5)
 
     def test_duplicate_rows_in_one_audit_are_collapsed(self):
         # 2026-11-21 は同じ時刻・同じ馬が2行入っていた
         audit = pd.concat([_audit("2026-10-12T09:46:00", 0.5)] * 2)
-        h1 = compute_day(_series(), audit, None)["races"][0]["horses"][0]
+        h1 = compute_day(_series(), audit)["races"][0]["horses"][0]
         self.assertEqual(h1["p_ens"], 0.5)
 
     def test_scratched_horse_sentinel_becomes_no_odds(self):
         series = _series()
         last = (series["polled_at"] == "2026-10-12T09:41:00") & (series["horse_num"] == 2.0)
         series.loc[last, ["win", "place_low", "place_high"]] = [999.9, -3.0, 999.9]
-        h2 = compute_day(series, _audit("2026-10-12T09:46:00", 0.5), None)["races"][0]["horses"][1]
+        h2 = compute_day(series, _audit("2026-10-12T09:46:00", 0.5))["races"][0]["horses"][1]
         self.assertEqual(h2["low"], [10.0, None])
         self.assertEqual(h2["win"], [30.0, None])
         self.assertEqual(h2["ev_low"], [1.0, None])
 
     def test_race_without_audit_has_no_ev(self):
-        r = compute_day(_series(), None, None)["races"][0]
+        r = compute_day(_series(), None)["races"][0]
         self.assertIsNone(r["audit_at"])
         self.assertEqual(r["horses"][0]["ev_low"], [None, None])
         self.assertEqual(r["horses"][0]["low"], [2.0, 3.0])
 
-    def test_exec_outranks_final_pick(self):
-        ledger = pd.DataFrame({"race_id": [RID] * 3, "horse_num": [1.0, 1.0, 2.0],
-                               "stage": ["FINAL", "EXEC", "PRELIM"]})
-        hs = compute_day(_series(), None, ledger)["races"][0]["horses"]
-        self.assertEqual([h["pick"] for h in hs], ["EXEC", None])
+    def test_every_computed_field_is_on_the_public_list(self):
+        # 項目を足したら、公開してよいかを決めて PUBLIC_*_KEYS に載せる（載せ忘れると公開版の画面から消える）
+        out = compute_day(_series(), _audit("2026-10-12T09:46:00", 0.5))
+        r = out["races"][0]
+        self.assertEqual(set(out) | {"date", "weekday"}, data.PUBLIC_DAY_KEYS)
+        self.assertEqual(set(r), data.PUBLIC_RACE_KEYS)
+        self.assertEqual(set(r["horses"][0]), data.PUBLIC_HORSE_KEYS)
 
-    def test_public_payload_has_no_internal_values(self):
-        # 公開版: 印も、本番の買い判定に使う値（T-15 基準の EV と複勝オッズ）も残さない
-        ledger = pd.DataFrame({"race_id": [RID], "horse_num": [1.0], "stage": ["EXEC"]})
-        out = strip_internal(compute_day(_series(), _audit("2026-10-12T09:46:00", 0.5), ledger))
+    def test_public_only_drops_unlisted_fields(self):
+        # 手元で足した項目（local_extras など）は、どの階層にあっても公開版に送らない
+        out = compute_day(_series(), _audit("2026-10-12T09:46:00", 0.5))
+        out["local_note"] = "x"
+        out["races"][0]["local_note"] = "x"
         for h in out["races"][0]["horses"]:
-            self.assertIsNone(h["pick"])
-            self.assertIsNone(h["ev_screen"])
-            self.assertIsNone(h["place_pre"])
+            h["extra"], h["mark"] = {"a": 1.0}, "x"
+        pub = public_only(out)
+        self.assertNotIn("local_", json.dumps(pub))
+        for h in pub["races"][0]["horses"]:
+            self.assertEqual(set(h), data.PUBLIC_HORSE_KEYS)
             self.assertIsNotNone(h["p_ens"])  # 画面に出す EV のもとは残す
+        self.assertIn("extra", out["races"][0]["horses"][0])  # 元の payload（キャッシュ）は書き換えない
 
     def test_race_card_and_meeting(self):
         entries = pd.DataFrame({
@@ -89,7 +94,7 @@ class ComputeDayTests(SimpleTestCase):
             "gender": ["牡", "牝"], "age": [3, 4], "weight": [57.0, 55.0], "jockey": ["武豊", "▲佐藤"],
             "race_name": ["2歳未勝利"] * 2, "course_len": [1400, 1400], "race_type": ["ダート"] * 2,
             "ground_state": ["良"] * 2})
-        out = compute_day(_series(), None, None, entries)
+        out = compute_day(_series(), None, entries)
         r = out["races"][0]
         self.assertEqual(out["meetings"], ["4回東京5日目"])
         self.assertEqual((r["meeting"], r["race_name"], r["course"]), ("4回東京5日目", "2歳未勝利", "ダ1400m"))
@@ -98,8 +103,36 @@ class ComputeDayTests(SimpleTestCase):
         self.assertEqual(h2["sex_age"], "牝4")
 
     def test_missing_race_card_leaves_names_empty(self):
-        h = compute_day(_series(), None, None, None)["races"][0]["horses"][0]
+        h = compute_day(_series(), None, None)["races"][0]["horses"][0]
         self.assertIsNone(h["name"])
+
+
+class LoadDayExtrasTests(SimpleTestCase):
+    """手元だけの追加表示（local_extras）は、公開版へ送る経路（extras=False）では呼ばない。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        _series().to_parquet(d / "nk_odds_series_2026-10-12.parquet")
+        self.fake = mock.Mock()
+        self.fake.files.return_value = []
+        self.fake.annotate.side_effect = lambda p, audit, date: p["races"][0]["horses"][0].update(mark="x")
+        for name, value in (("DATA_DIR", d), ("VIEWER_DIR", d / "viewer"), ("DB_PATH", d / "none.db"),
+                            ("local_extras", self.fake), ("_cache", {})):
+            patcher = mock.patch.object(data, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_public_path_never_calls_extras(self):
+        out = public_only(data.load_day("2026-10-12", extras=False))
+        self.fake.annotate.assert_not_called()
+        self.assertNotIn("mark", out["races"][0]["horses"][0])
+
+    def test_local_path_calls_extras_and_caches_separately(self):
+        self.assertEqual(data.load_day("2026-10-12")["races"][0]["horses"][0]["mark"], "x")
+        self.assertNotIn("mark", data.load_day("2026-10-12", extras=False)["races"][0]["horses"][0])
+        self.fake.annotate.assert_called_once()
 
 
 def _series_at(*hms):
@@ -125,7 +158,7 @@ class PhaseTests(SimpleTestCase):
     def test_phase_follows_viewer_stage_then_final(self):
         viewer = _viewer(("09:29:00", "S4", {1.0: 0.3, 2.0: 0.05}), ("09:35:00", "S5", {1.0: 0.4, 2.0: 0.06}))
         r = compute_day(_series_at("09:30:00", "09:35:30", "09:40:00", "09:47:00"),
-                        _audit("2026-10-12T09:46:00", 0.5), None, None, viewer)["races"][0]
+                        _audit("2026-10-12T09:46:00", 0.5), None, viewer)["races"][0]
         self.assertEqual(r["phase"], ["pre", "tyb", "tyb", "final"])
         self.assertEqual(r["tyb_at"], "09:35:00")
         h1, h2 = r["horses"]
@@ -136,43 +169,43 @@ class PhaseTests(SimpleTestCase):
     def test_stale_viewer_record_is_not_used(self):
         # 記録係が止まった後の古い予測を、その時刻の予測として出さない
         viewer = _viewer(("09:20:00", "S4", {1.0: 0.3}))
-        r = compute_day(_series_at("09:30:00"), None, None, None, viewer)["races"][0]
+        r = compute_day(_series_at("09:30:00"), None, None, viewer)["races"][0]
         self.assertEqual(r["phase"], [None])
         self.assertEqual(r["horses"][0]["p"], [None])
 
     def test_horse_missing_from_viewer_has_no_p(self):
         viewer = _viewer(("09:29:00", "S4", {1.0: 0.3}))
-        r = compute_day(_series_at("09:30:00"), None, None, None, viewer)["races"][0]
+        r = compute_day(_series_at("09:30:00"), None, None, viewer)["races"][0]
         self.assertEqual([h["p"] for h in r["horses"]], [[0.3], [None]])
 
     def test_tyb_at_is_earlier_of_shadow_and_viewer(self):
         viewer = _viewer(("09:35:00", "S5", {1.0: 0.4}))
         shadow = pd.DataFrame({"race_id": [RID], "first_seen_at": ["2026-10-12T09:34:20"]})
-        r = compute_day(_series_at("09:30:00"), None, None, None, viewer, shadow)["races"][0]
+        r = compute_day(_series_at("09:30:00"), None, None, viewer, shadow)["races"][0]
         self.assertEqual(r["tyb_at"], "09:34:20")
 
     def test_without_viewer_only_final_is_known(self):
         # 記録係を動かしていない日: TYB の時刻は本番の記録から分かるが、確定前の予測は無い
         shadow = pd.DataFrame({"race_id": [RID], "first_seen_at": ["2026-10-12T09:34:20"]})
         r = compute_day(_series_at("09:40:00", "09:47:00"), _audit("2026-10-12T09:46:00", 0.5),
-                        None, None, None, shadow)["races"][0]
+                        None, None, shadow)["races"][0]
         self.assertEqual(r["tyb_at"], "09:34:20")
         self.assertEqual(r["phase"], [None, "final"])
         self.assertEqual(r["horses"][0]["p"], [None, 0.5])
 
-    def test_viewer_selection_columns_never_reach_payload(self):
-        # 記録係のファイルには買い判定の列もある。公開版のデータに混ざらないこと
-        viewer = _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(sel_prod=True, ev_prod=1.9, rule="x", price=2.0)
-        out = strip_internal(compute_day(_series_at("09:30:00"), None, None, None, viewer))
+    def test_other_viewer_columns_never_reach_payload(self):
+        # 記録係のファイルには他の列もある。公開版のデータに混ざらないこと
+        viewer = _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(other_flag=True, other_score=1.9)
+        out = public_only(compute_day(_series_at("09:30:00"), None, None, viewer))
         text = json.dumps(out, ensure_ascii=False)
-        for word in ("sel_", "ev_prod", "rule", "price", "p_place"):
+        for word in ("other_", "p_place"):
             self.assertNotIn(word, text)
         self.assertEqual(out["races"][0]["horses"][0]["p"], [0.3])
 
     def test_load_viewer_reads_only_needed_columns(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d, f"{RID}.parquet")
-            _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(sel_prod=True).to_parquet(f)
+            _viewer(("09:29:00", "S4", {1.0: 0.3})).assign(other_flag=True).to_parquet(f)
             Path(d, "broken.parquet").write_bytes(b"not parquet")
             v = data.load_viewer([f, Path(d, "broken.parquet")])  # 壊れたファイルは飛ばす
         self.assertEqual(list(v.columns), data.VIEWER_COLS)

@@ -1,8 +1,8 @@
 import EvChart, { ChartLegend } from './EvChart'
-import { PHASE, cellAt, evColor, evTextColor, fmt, hasLive, idxAt, phaseAt, raceStatus, tybLead } from './ev'
+import { PHASE, cellAt, evColor, evTextColor, fmt, fmtExtra, hasLive, idxAt, phaseAt, raceStatus, tybLead } from './ev'
 
-// internal=false（公開版）では「本番EV」列と買い目の列を出さない
-export default function RaceDetail({ race, cursor, basis, hindsight, thr, internal = true }) {
+// extraCols は手元の API だけが付ける追加の列（公開版には無い）。値は馬ごとの h.extra[key]
+export default function RaceDetail({ race, cursor, basis, hindsight, thr, extraCols = [] }) {
   const i = idxAt(race.times, cursor)
   const st = raceStatus(race, i)
   const ph = phaseAt(race, i)
@@ -47,7 +47,7 @@ export default function RaceDetail({ race, cursor, basis, hindsight, thr, intern
       </>}
       <table className="horses">
         <thead>
-          <tr><th>馬番</th><th className="txt">馬名</th><th className="txt">性齢</th><th className="txt">騎手</th><th>斤量</th><th title="選んだ時刻の予測（3着以内に入る確率）">複勝率</th><th>単勝</th><th>複勝</th><th>EV</th>{internal && <><th title="本番が買い判定に使う値（T-15の複勝オッズ基準）">本番EV</th><th /></>}</tr>
+          <tr><th>馬番</th><th className="txt">馬名</th><th className="txt">性齢</th><th className="txt">騎手</th><th>斤量</th><th title="選んだ時刻の予測（3着以内に入る確率）">複勝率</th><th>単勝</th><th>複勝</th><th>EV</th>{extraCols.map((col) => <th key={col.key} title={col.title}>{col.label}</th>)}</tr>
         </thead>
         <tbody>
           {rows.map(({ h, c }) => {
@@ -65,10 +65,11 @@ export default function RaceDetail({ race, cursor, basis, hindsight, thr, intern
                 <td className="evcell" style={{ background: evColor(ev, thr) ?? 'transparent', color: evTextColor(ev, thr) }}>
                   {fmt(ev)}
                 </td>
-                {internal && <>
-                  <td style={{ color: h.ev_screen != null && h.ev_screen >= thr ? 'var(--hot)' : undefined }}>{fmt(h.ev_screen)}</td>
-                  <td>{h.pick === 'EXEC' ? '★購入' : h.pick === 'FINAL' ? '☆通知' : ''}</td>
-                </>}
+                {extraCols.map((col) => {
+                  const v = h.extra?.[col.key]
+                  const hot = col.hot && typeof v === 'number' && v >= thr
+                  return <td key={col.key} style={hot ? { color: 'var(--hot)' } : undefined}>{fmtExtra(v)}</td>
+                })}
               </tr>
             )
           })}

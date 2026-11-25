@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { PHASE, cellAt, evColor, evTextColor, fmt, idxAt, phaseAt, raceStatus } from './ev'
-
-const PICK_MARK = { EXEC: '★', FINAL: '☆' }
+import { PHASE, cellAt, evColor, evTextColor, fmt, fmtExtra, idxAt, phaseAt, raceStatus } from './ev'
 
 // Floating card shown while hovering a cell (replaces the browser's plain title tooltip)
-function Tip({ tip, thr }) {
+// extraCols と h.extra・h.mark は手元の API だけが付ける追加の表示（公開版には無い）
+function Tip({ tip, thr, extraCols }) {
   const { race: r, horse: h, c, x, y } = tip
   const ev = c.kind === 'ev' ? c.ev : null
   const left = Math.min(x, window.innerWidth - 270)
@@ -14,7 +13,7 @@ function Tip({ tip, thr }) {
       <div className="tip-horse">
         <span className="tip-num">{h.num}</span>
         <b>{h.name ?? '（馬名なし）'}</b>
-        {h.pick && <span className="pick-inline">{PICK_MARK[h.pick]}</span>}
+        {h.mark && <span className="mark-inline">{h.mark}</span>}
       </div>
       <div className="tip-sub">
         {[h.sex_age, h.jockey, h.kinryo != null ? `${h.kinryo}kg` : null].filter(Boolean).join(' ・ ') || '出走表なし'}
@@ -29,9 +28,11 @@ function Tip({ tip, thr }) {
         <dt>複勝率</dt><dd>{fmt(c.p, 3)}{c.p != null && c.phase !== 'final' && h.p_ens != null && <small> 確定 {fmt(h.p_ens, 3)}</small>}</dd>
         <dt>単勝</dt><dd>{fmt(c.win, 1)}</dd>
         <dt>複勝</dt><dd>{c.low == null ? '–' : `${fmt(c.low, 1)}–${fmt(c.high, 1)}`}</dd>
-        {h.ev_screen != null && <><dt>本番EV</dt><dd>{fmt(h.ev_screen)} <small>T-15基準</small></dd></>}
+        {extraCols.filter((col) => col.tip !== false && h.extra?.[col.key] != null).map((col) => (
+          <ExtraRow key={col.key} col={col} value={h.extra[col.key]} />
+        ))}
       </dl>
-      {h.pick && <div className="tip-pick">{h.pick === 'EXEC' ? '★ 購入した' : '☆ 最終通知した'}</div>}
+      {h.mark_note && <div className="tip-mark">{h.mark_note}</div>}
     </div>
   )
 }
@@ -39,7 +40,7 @@ function Tip({ tip, thr }) {
 function Cell({ race, horse, cursor, basis, hindsight, thr, onHover }) {
   if (!horse) return <td className="cell empty" />
   const c = cellAt(race, horse, idxAt(race.times, cursor), cursor, basis, hindsight)
-  const mark = horse.pick ? <span className="pick">{PICK_MARK[horse.pick]}</span> : null
+  const mark = horse.mark ? <span className="cell-mark">{horse.mark}</span> : null
   if (c.kind === 'none') return <td className="cell none">{mark}</td>
   const hover = {
     onMouseEnter: (e) => {
@@ -69,7 +70,11 @@ function Cell({ race, horse, cursor, basis, hindsight, thr, onHover }) {
   )
 }
 
-export default function Heatmap({ races, cursor, basis, hindsight, thr, selected, onSelect }) {
+function ExtraRow({ col, value }) {
+  return <><dt>{col.label}</dt><dd>{fmtExtra(value)}{col.note && <small> {col.note}</small>}</dd></>
+}
+
+export default function Heatmap({ races, cursor, basis, hindsight, thr, selected, onSelect, extraCols = [] }) {
   const [tip, setTip] = useState(null)
   const maxN = Math.max(0, ...races.flatMap((r) => r.horses.map((h) => h.num)))
   const cols = Array.from({ length: maxN }, (_, k) => k + 1)
@@ -111,7 +116,7 @@ export default function Heatmap({ races, cursor, basis, hindsight, thr, selected
           })}
         </tbody>
       </table>
-      {live && live.c.kind !== 'none' && <Tip tip={live} thr={thr} />}
+      {live && live.c.kind !== 'none' && <Tip tip={live} thr={thr} extraCols={extraCols} />}
     </div>
   )
 }

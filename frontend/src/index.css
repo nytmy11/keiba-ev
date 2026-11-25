@@ -107,7 +107,7 @@ thead .rowhead { display: table-cell; height: auto; }
 .cell.pre { background-image: repeating-linear-gradient(135deg, rgba(0, 0, 0, 0.32) 0 3px, transparent 3px 7px); }
 .cell.over-pre { font-weight: 700; }
 .cell.pending.pre { background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 3px, transparent 3px 7px); }
-.pick { position: absolute; top: -1px; right: 2px; font-size: 10px; color: #ffe066; text-shadow: 0 0 3px #000; }
+.cell-mark { position: absolute; top: -1px; right: 2px; font-size: 10px; color: #ffe066; text-shadow: 0 0 3px #000; }
 
 .detail {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -165,13 +165,13 @@ thead .rowhead { display: table-cell; height: auto; }
 .tip-race { color: var(--fg-dim); font-size: 11px; }
 .tip-horse { display: flex; align-items: center; gap: 6px; font-size: 15px; margin-top: 2px; }
 .tip-num { display: inline-grid; place-items: center; min-width: 20px; height: 20px; border-radius: 4px; background: #2c3443; font-size: 12px; font-weight: 700; }
-.pick-inline { color: #ffe066; }
+.mark-inline { color: #ffe066; }
 .tip-sub { color: var(--fg-dim); margin-bottom: 4px; }
 .tip dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; margin: 0; font-variant-numeric: tabular-nums; }
 .tip dt { color: var(--fg-dim); }
 .tip dd { margin: 0; }
 .tip small { color: var(--fg-dim); }
-.tip-pick { margin-top: 4px; color: #ffe066; }
+.tip-mark { margin-top: 4px; color: #ffe066; }
 
 .raceinfo { margin: 2px 0 0; font-size: 13px; }
 .horses th.txt, .horses td.txt { text-align: left; }

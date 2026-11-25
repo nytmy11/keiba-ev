@@ -32,7 +32,7 @@ export function idxAt(times, cursor) {
   return lo
 }
 
-// Is p_ens usable at the cursor? It is logged once at the FINAL stage (~T-3min).
+// Is p_ens usable at the cursor? It is logged once, about 3 minutes before the close.
 export function pensKnown(race, cursor, hindsight) {
   return race.audit_at != null && (hindsight || cursor >= race.audit_at)
 }
@@ -115,6 +115,8 @@ export function raceStatus(race, i) {
 }
 
 export const fmt = (x, nd = 2) => (x == null ? '–' : x.toFixed(nd))
+// 手元の API が足す追加の列の値（数値なら小数2桁、文字はそのまま）
+export const fmtExtra = (x) => (typeof x === 'number' ? fmt(x) : (x ?? ''))
 
 // '2026-10-12' -> '月' (local date, so no UTC shift)
 export const weekday = (d) => '日月火水木金土'[new Date(`${d}T00:00:00`).getDay()]

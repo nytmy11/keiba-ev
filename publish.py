@@ -9,7 +9,7 @@
   KEIBA_EV_PUSH_URL=https://<サービス名>.onrender.com
   KEIBA_EV_PUSH_TOKEN=<Render に設定したものと同じ文字列>
 
-公開版には買い目（★☆）を一切送らない。ledger_lastcall.parquet は読まない（data.load_day(picks=False)）。
+公開版へ送るのは data.PUBLIC_*_KEYS に載せた項目だけ（data.load_day(extras=False) → data.public_only）。
 """
 from __future__ import annotations
 
@@ -63,8 +63,8 @@ def load_secrets() -> tuple[str, str]:
 
 
 def build(date: str) -> dict:
-    """公開用の1日分。買い目なし。"""
-    return data.load_day(date, picks=False)
+    """公開用の1日分。手元だけの追加表示は読まず、許可リストの項目だけにする。"""
+    return data.public_only(data.load_day(date, extras=False))
 
 
 def push(url: str, token: str, date: str, gz: bytes) -> bool:

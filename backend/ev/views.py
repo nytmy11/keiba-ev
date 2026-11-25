@@ -1,7 +1,7 @@
 """API。settings.KEIBA_EV_SOURCE で動き方が変わる。
 
-- "local"（自宅PC・既定）: deepimpact の parquet をその場で読んで計算する（★☆ の印あり）
-- "store"（公開版・Render）: 自宅PCから送られてきた計算済み JSON を返すだけ（印なし・pandas 不要）
+- "local"（自宅PC・既定）: deepimpact の parquet をその場で読んで計算する
+- "store"（公開版・Render）: 自宅PCから送られてきた計算済み JSON を返すだけ（pandas 不要）
 """
 import gzip
 import hmac
@@ -32,7 +32,7 @@ class DatesView(APIView):
             dates = data.available_dates()
         return Response({"dates": dates, "today": _date.today().isoformat(),
                          "ev_thr_default": EV_THR_DEFAULT,
-                         "public": _is_store()})  # True なら画面は買い目の説明を出さない
+                         "public": _is_store()})  # 公開版なら True（画面の説明文を切り替える）
 
 
 class DayView(APIView):
